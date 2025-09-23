@@ -3,15 +3,15 @@
 Author: Jonathan Parkinson <jlparkinson1@gmail.com>
 License: MIT
 """
-
-import numpy as np, math
+import math
+import numpy as np
 from scipy.linalg import solve_triangular, solve
 from scipy.special import gamma, logsumexp, digamma, polygamma, loggamma
 from scipy.optimize import newton
 from .variational_hyperparams import VariationalMixHyperparams as Hyperparams
 from .parameter_bundle import ParameterBundle
-from optimized_mstep_functions import squaredMahaDistance
-from .mixture_base_class import MixtureBaseClass 
+from .utilities import sq_maha_distance
+from .mixture_base_class import MixtureBaseClass
 
 
 
@@ -307,12 +307,7 @@ class VariationalStudentMixture(MixtureBaseClass):
                                    range(self.n_components)])
 
         params.resp = np.zeros((X.shape[0], self.n_components))
-        sq_maha_dist = np.empty((X.shape[0], self.n_components))
-        #The C / Cython extension (squaredMahaDistance) is faster than the pure Python
-        #implementation (sq_maha_distance) which is nonetheless useful for testing.
-        squaredMahaDistance(X, params.loc_, params.scale_inv_chole_,
-                sq_maha_dist)
-        #sq_maha_dist = self.sq_maha_distance(X, params.loc_, params.scale_inv_chole_)
+        sq_maha_dist = sq_maha_distance(X, params.loc_, params.scale_chole_)
         
         assigned_comp = np.argmin(sq_maha_dist, axis=1)
         params.resp[np.arange(X.shape[0]), assigned_comp] = 1.0
@@ -379,10 +374,8 @@ class VariationalStudentMixture(MixtureBaseClass):
                 sometimes advantageous to use this in place of the variational
                 lower bound for determining convergence.
         """
-        squaredMahaDistance(X, params.loc_, params.scale_inv_chole_,
-                        sq_maha_dist)
-        #sq_maha_dist = self.sq_maha_distance(X, params.loc_, params.scale_inv_chole_)
-        
+        sq_maha_dist = sq_maha_distance(X, params.loc_, params.scale_chole_)
+
         sq_maha_dist = sq_maha_dist * params.wishart_vm[np.newaxis,:] + \
                        X.shape[1] / params.eta_m[np.newaxis,:]
         weighted_loglik = self.variational_loglik(X, params, sq_maha_dist)
@@ -676,34 +669,6 @@ class VariationalStudentMixture(MixtureBaseClass):
         function (see self.optimize_df). 
         """
         return -0.25 * polygamma(2, 0.5 * dof) - 1 / (dof**2)
-
-
-
-    def sq_maha_distance(self, X, loc_, scale_inv_cholesky_):
-        """Calculates the squared mahalanobis distance for X to all components. Returns an
-        array of dim N x K for N datapoints, K mixture components.
-        This is slower than the C extension so it is primarily used for testing
-        purposes.
-
-        Args:
-            X (np.ndarray): A 2d numpy array containing the input data of shape
-                N x M for N datapoints, M features.
-            loc_ (np.ndarray): A 2d numpy array of shape K x M for K components,
-                M features.
-            scale_inv_cholesky_ (np.ndarray): The inverse of the cholesky 
-                decomposition of the scale matrices.
-
-        Returns:
-            sq_maha_dist (np.ndarray): An N x K for N datapoints, K components
-                numpy array containing the squared mahalanobis distance for
-                each datapoint to each cluster.
-        """
-        sq_maha_dist = np.empty((X.shape[0], scale_inv_cholesky_.shape[2]))
-        for i in range(sq_maha_dist.shape[1]):
-            y = np.dot(X, scale_inv_cholesky_[:,:,i])
-            y = y - np.dot(loc_[i,:], scale_inv_cholesky_[:,:,i])[np.newaxis,:]
-            sq_maha_dist[:,i] = np.sum(y**2, axis=1)
-        return sq_maha_dist
 
 
     #Invert a stack of cholesky decompositions of a scale or precision matrix.

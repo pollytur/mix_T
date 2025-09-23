@@ -3,12 +3,13 @@
 Author: Jonathan Parkinson <jlparkinson1@gmail.com>
 License: MIT
 """
-import numpy as np, math
+import math
+import numpy as np
 from scipy.linalg import solve_triangular
-from scipy.special import gammaln, logsumexp, digamma, polygamma
+from scipy.special import logsumexp, digamma, polygamma
 from scipy.optimize import newton
-from optimized_mstep_functions import squaredMahaDistance, EM_Mstep_Optimized_Calc
 from sklearn.cluster import KMeans
+from .utilities import sq_maha_distance, scale_update_calcs
 from .mixture_base_class import MixtureBaseClass
 
 
@@ -41,8 +42,6 @@ class EMStudentMixture(MixtureBaseClass):
             for M input dimensions, K components.
         scale_cholesky_ (np.ndarray): The cholesky decompositions of the scale matrices;
             same shape as the scale_ attribute.
-        scale_inv_cholesky_ (np.ndarray): The cholesky decomposition of the inverse of
-            the scale matrices; same shape as scale_ attribute.
         converged_ (bool): Indicates whether the model converged during fitting.
         n_iter_ (int): The number of iterations completed during fitting.
         df_ (np.ndarray): The degrees of freedom for each mixture component; a 1d
@@ -95,7 +94,6 @@ class EMStudentMixture(MixtureBaseClass):
         self.location_ = None
         self.scale_ = None
         self.scale_cholesky_ = None
-        self.scale_inv_cholesky_ = None
         self.converged_ = False
         self.n_iter_ = 0
         self.df_ = None
@@ -114,30 +112,30 @@ class EMStudentMixture(MixtureBaseClass):
         """
         x = self.check_fitting_data(X)
         best_lower_bound = -np.inf
-        #We use self.n_init restarts and save the best result. More restarts = better 
+
+        #We use self.n_init restarts and save the best result. More restarts = better
         #chance to find the best possible solution, but also higher cost.
         for i in range(self.n_init):
             #Increment random state so that each random initialization is different from the
             #rest but so that the overall chain is reproducible.
-            lower_bound, convergence, loc_, scale_, scale_inv_cholesky_, mix_weights_,\
+            lower_bound, convergence, loc_, scale_, mix_weights_,\
                     df_, scale_cholesky_ = self.fitting_restart(x, self.random_state + i)
             if self.verbose:
-                print("Restart %s now complete"%i)
-            if convergence == False:
-                print("Restart %s did not converge!"%(i+1))
+                print(f"Restart {i} now complete")
+            if not convergence:
+                print(f"Restart {i+1} did not converge!")
             #If this is the best lower bound we've seen so far, update our saved
             #parameters.
             elif lower_bound > best_lower_bound:
                 best_lower_bound = lower_bound
                 self.df_, self.location_, self.scale_ = df_, loc_, scale_
-                self.scale_inv_cholesky_ = scale_inv_cholesky_
                 self.scale_cholesky_ = scale_cholesky_
                 self.mix_weights_ = mix_weights_
                 self.converged_ = True
-        if self.converged_ == False:
+        if not self.converged_:
             print("The model did not converge on any of the restarts! Try increasing max_iter or "
                         "tol or check data for possible issues.")
-    
+
 
     def fitting_restart(self, X, random_state):
         """A single fitting restart.
@@ -148,49 +146,48 @@ class EMStudentMixture(MixtureBaseClass):
             random_state (int): The seed for the random number generator.
         
         Returns:
-            current_bound (float): The lower bound for the current fitting iteration. The caller (self.fit)
-                keeps the set of parameters that have the best associated lower bound.
+            current_bound (float): The lower bound for the current fitting iteration.
+                The caller (self.fit) keeps the set of parameters that have the best
+                associated lower bound.
             convergence (bool): A boolean indicating convergence or lack thereof.
             loc_ (np.ndarray): The locations (analogous to means for a Gaussian) of the components.
                 Shape is K x M for K components, M dimensions.
             scale_ (np.ndarray): The scale matrices (analogous to covariance for a Gaussian).
                 Shape is M x M x K for M dimensions, K components.
-            scale_inv_cholesky_ (np.ndarray): The cholesky decomposition of the 
-                inverse of the scale matrices. Shape is M x M x K for D dimensions, 
-                K components.
             mix_weights_ (np.ndarray): The mixture weights. SHape is K for K components.
             df_ (np.ndarray): The degrees of freedom. Shape is K for K components.
             scale_cholesky_ (np.ndarray): The cholesky decomposition of the scale matrices.
                 Shape is M x M x K for M dimensions, K components.
         """
         df_ = np.full((self.n_components), self.start_df_, dtype=np.float64)
-        loc_, scale_, mix_weights_, scale_cholesky_, scale_inv_cholesky_ = \
+        loc_, scale_, mix_weights_, scale_cholesky_ = \
                 self.initialize_params(X, random_state, self.init_type)
         lower_bound, convergence = -np.inf, False
         sq_maha_dist = np.empty((X.shape[0], self.n_components))
+
         #For each iteration, we run the E step calculations then the M step
         #calculations, update the lower bound then check for convergence.
-        for i in range(self.max_iter):
-            resp, E_gamma, current_bound = self.Estep(X, df_, loc_, scale_inv_cholesky_, 
+        for _ in range(self.max_iter):
+            resp, E_gamma, current_bound = self.Estep(X, df_, loc_,
                                 scale_cholesky_, mix_weights_, sq_maha_dist)
-            
-            mix_weights_, loc_, scale_, scale_cholesky_, scale_inv_cholesky_,\
-                            df_ = self.Mstep(X, resp, E_gamma, scale_, 
-                                scale_cholesky_, df_, scale_inv_cholesky_)
+
+            mix_weights_, loc_, scale_, scale_cholesky_, \
+                            df_ = self.Mstep(X, resp, E_gamma, scale_,
+                                scale_cholesky_, df_)
             change = current_bound - lower_bound
             if abs(change) < self.tol:
                 convergence = True
                 break
             lower_bound = current_bound
             if self.verbose:
-                print("Change in lower bound: %s"%change)
-                print("Actual lower bound: %s" % current_bound)
-        return current_bound, convergence, loc_, scale_, scale_inv_cholesky_,\
+                print(f"Change in lower bound: {change}")
+                print(f"Actual lower bound: {current_bound}")
+        return current_bound, convergence, loc_, scale_, \
                 mix_weights_, df_, scale_cholesky_
 
 
 
-    def Estep(self, X, df_, loc_, scale_inv_cholesky_, scale_cholesky_, mix_weights_,
+    def Estep(self, X, df_, loc_, scale_cholesky_, mix_weights_,
             sq_maha_dist):
         """Update the "hidden variables" in the mixture description.
         
@@ -199,9 +196,6 @@ class EMStudentMixture(MixtureBaseClass):
             df_ (np.ndarray): The degrees of freedom. Shape is K for K components.
             loc_ (np.ndarray): The current values of the locations of the components.
                 Shape is K x D for K components, D dimensions.
-            scale_inv_cholesky_ (np.ndarray): The cholesky decomposition of the 
-                inverse of the scale matrices. Shape is M x M x K for M dimensions, 
-                K components.
             scale_cholesky_ (np.ndarray): The cholesky decomposition of the scale matrices.
                 Shape is M x M x K for M dimensions, K components.
             mix_weights_ (np.ndarray: The mixture weights. Shape is K for K components.
@@ -218,13 +212,13 @@ class EMStudentMixture(MixtureBaseClass):
             """
         #We use the C extension to calculate squared mahalanobis distance and pass
         #it the array (sq_maha_dist) in which we would like to store the output.
-        squaredMahaDistance(X, loc_, scale_inv_cholesky_, sq_maha_dist)
-        
-        loglik = self.get_loglikelihood(X, sq_maha_dist, df_, 
+        sq_maha_dist = sq_maha_distance(X, loc_, scale_cholesky_)
+
+        loglik = self.get_loglikelihood(X, sq_maha_dist, df_,
                 scale_cholesky_, mix_weights_)
 
         weighted_log_prob = loglik + np.log(np.clip(mix_weights_,
-                                        a_min=1e-9, a_max=None))[np.newaxis,:]
+                                        a_min=1e-12, a_max=None))[np.newaxis,:]
         log_prob_norm = logsumexp(weighted_log_prob, axis=1)
         with np.errstate(under="ignore"):
             resp = np.exp(weighted_log_prob - log_prob_norm[:, np.newaxis])
@@ -234,10 +228,9 @@ class EMStudentMixture(MixtureBaseClass):
 
 
 
-    def Mstep(self, X, resp, E_gamma, scale_, scale_cholesky_, df_,
-        scale_inv_cholesky_):
-        """The M-step in mixture fitting. Updates the component parameters using the "hidden variable"
-        values calculated in the E-step.
+    def Mstep(self, X, resp, E_gamma, scale_, scale_cholesky_, df_):
+        """The M-step in mixture fitting. Updates the component parameters
+        using the "hidden variable" values calculated in the E-step.
     
         Args:
             X (np.ndarray): The input data. A numpy array of shape N x M for N datapoints,
@@ -252,8 +245,6 @@ class EMStudentMixture(MixtureBaseClass):
             scale_cholesky_ (np.ndarray): The cholesky decomposition of the scale matrices.
                 Shape is M x M x K for M dimensions, K components.
             df_ (np.ndarray): The degrees of freedom. Shape is K for K components.
-            scale_inv_cholesky_ (np.ndarray): The cholesky decomposition of the inverse of the scale matrices.
-                Shape is M x M x K for M dimensions, K components.
         
         Returns:
             mix_weights_ (np.ndarray): The mixture weights. SHape is K for K components.
@@ -263,8 +254,6 @@ class EMStudentMixture(MixtureBaseClass):
                 Shape is D x D x K for D dimensions, K components.
             scale_cholesky_ (np.ndarray): The cholesky decomposition of the scale matrices.
                 Shape is D x D x K for D dimensions, K components.
-            scale_inv_cholesky_ (np.ndarray): The cholesky decomposition of the inverse of the scale matrices.
-                Shape is D x D x K for D dimensions, K components.
             df_ (np.ndarray): The degrees of freedom. Shape is K for K components.
         """
         mix_weights_ = np.mean(resp, axis=0)
@@ -272,15 +261,15 @@ class EMStudentMixture(MixtureBaseClass):
         loc_ = np.dot(ru.T, X)
         resp_sum = np.sum(ru, axis=0) + 10 * np.finfo(resp.dtype).eps
         loc_ = loc_ / resp_sum[:,np.newaxis]
-        
+
         #This call to the Cython extension updates the scale, scale cholesky
         #and scale inv cholesky matrices and is faster than the pure
         #Python implementation for a large number of clusters or dimensions.
-        EM_Mstep_Optimized_Calc(X, ru, scale_, scale_cholesky_,
-                        scale_inv_cholesky_, loc_, resp_sum, self.reg_covar)
-        if self.fixed_df == False:
+        scale_, scale_cholesky_ = scale_update_calcs(X, ru, loc_,
+                resp_sum, self.reg_covar)
+        if not self.fixed_df:
             df_ = self.optimize_df(X, resp, E_gamma, df_)
-        return mix_weights_, loc_, scale_, scale_cholesky_, scale_inv_cholesky_, df_
+        return mix_weights_, loc_, scale_, scale_cholesky_, df_
 
 
 
@@ -317,7 +306,7 @@ class EMStudentMixture(MixtureBaseClass):
             #if the user has set a very small value for max_iter, which is used both
             #for the maximum number of iterations per restart AND for the max
             #number of iterations per newton raphson optimization, or because
-            #df is going to infinity, because the distribution is very close to 
+            #df is going to infinity, because the distribution is very close to
             #normal. If it doesn't converge, keep the last estimated value.
             if math.isnan(optimal_df) == False:
                 df_[i] = optimal_df
@@ -351,55 +340,6 @@ class EMStudentMixture(MixtureBaseClass):
         return -0.25 * polygamma(2, 0.5 * dof) - 1 / (dof**2)
 
 
-
-    def sq_maha_distance(self, X, loc_, scale_inv_cholesky_):
-        """Calculates the squared mahalanobis distance for X to all components. Returns an
-        array of dim N x K for N datapoints, K mixture components.
-        This is slower than the C extension so it is primarily used for testing
-        purposes.
-
-        Args:
-            X (np.ndarray): A 2d numpy array containing the input data of shape
-                N x M for N datapoints, M features.
-            loc_ (np.ndarray): A 2d numpy array of shape K x M for K components,
-                M features.
-            scale_inv_cholesky_ (np.ndarray): The inverse of the cholesky 
-                decomposition of the scale matrices.
-
-        Returns:
-            sq_maha_dist (np.ndarray): An N x K for N datapoints, K components
-                numpy array containing the squared mahalanobis distance for
-                each datapoint to each cluster.
-        """
-        sq_maha_dist = np.empty((X.shape[0], scale_inv_cholesky_.shape[2]))
-        for i in range(sq_maha_dist.shape[1]):
-            y = np.dot(X, scale_inv_cholesky_[:,:,i])
-            y = y - np.dot(loc_[i,:], scale_inv_cholesky_[:,:,i])[np.newaxis,:]
-            sq_maha_dist[:,i] = np.sum(y**2, axis=1)
-        return sq_maha_dist
-
-
-    def get_scale_inv_cholesky(self, scale_cholesky_, scale_inv_cholesky_):
-        """Gets the inverse of the cholesky decomposition of the scale matrix.
-
-        Args:
-            scale_cholesky_ (np.ndarray): The cholesky decomposition of the 
-                scale matrices, of shape M x M x K for M features, K components.
-            scale_inv_cholesky_ (np.ndarray): The inverse of the cholesky
-                decomposition of the scale matrices. Same shape as scale_cholesky_.
-                This will be overwritten here.
-
-        Returns:
-            scale_inv_cholesky_ (np.ndarray): The input scale_inv_cholesky_
-                overwritten with the updated inverse of the cholesky decomposition
-                of the scale matrices.
-        """
-        for i in range(scale_cholesky_.shape[2]):
-            scale_inv_cholesky_[:,:,i] = solve_triangular(scale_cholesky_[:,:,i],
-                    np.eye(scale_cholesky_.shape[0]), lower=True).T
-        return scale_inv_cholesky_
-
-
     
 
     def initialize_params(self, X, random_seed, init_type):
@@ -428,8 +368,6 @@ class EMStudentMixture(MixtureBaseClass):
                 of shape K for K components.
             scale_cholesky_ (np.ndarray): The cholesky decomposition of the scale
                 matrices; same shape as scale_.
-            scale_inv_cholesky_ (np.ndarray): The inverse of the cholesky decomposition
-                of the scale matrices. Same shape as scale_.
         """
         if init_type == "kmeans":
             loc_ = self.kmeans_initialization(X, random_seed)
@@ -450,10 +388,7 @@ class EMStudentMixture(MixtureBaseClass):
                         axis=-1)
         scale_cholesky_ = [np.linalg.cholesky(scale_[:,:,i]) for i in range(self.n_components)]
         scale_cholesky_ = np.stack(scale_cholesky_, axis=-1)
-        scale_inv_cholesky_ = np.empty_like(scale_cholesky_)
-        scale_inv_cholesky_ = self.get_scale_inv_cholesky(scale_cholesky_,
-                            scale_inv_cholesky_)
-        return loc_, scale_, mix_weights_, scale_cholesky_, scale_inv_cholesky_
+        return loc_, scale_, mix_weights_, scale_cholesky_
 
 
 

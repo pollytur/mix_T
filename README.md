@@ -31,10 +31,10 @@ in the unlikely event you encounter this, I recommend the solution described und
 
 ### Usage
 
-- [EMStudentMixture](https://github.com/jlparkI/mix_T/blob/main/Documentation/Finite_Mixture_Docs.md)<br>
-- [VariationalStudentMixture](https://github.com/jlparkI/mix_T/blob/main/Documentation/Variational_Mixture_Docs.md)<br>
-- [Tutorial: Modeling with mixtures](https://github.com/jlparkI/mix_T/blob/main/Documentation/Tutorial.md)<br>
+- [EMStudentMixture](https://github.com/jlparkI/mix_T/blob/main/docs/Finite_Mixture_Docs.md)<br>
+- [VariationalStudentMixture](https://github.com/jlparkI/mix_T/blob/main/docs/Variational_Mixture_Docs.md)<br>
+- [Tutorial: Modeling with mixtures](https://github.com/jlparkI/mix_T/blob/main/docs/Tutorial.md)<br>
 
 ### Background
 
-- [Deriving the mean-field formula](https://github.com/jlparkI/mix_T/blob/main/Documentation/variational_mean_field.pdf)<br>
+- [Deriving the mean-field formula](https://github.com/jlparkI/mix_T/blob/main/docs/variational_mean_field.pdf)<br>

@@ -3,14 +3,10 @@
 Author: Jonathan Parkinson <jlparkinson1@gmail.com>
 License: MIT
 """
-
 from abc import ABCMeta
 import numpy as np
-import numpy as np, math
-from scipy.linalg import solve_triangular
-from scipy.special import gammaln, logsumexp, digamma, polygamma
-from scipy.optimize import newton
-from optimized_mstep_functions import squaredMahaDistance
+from scipy.special import gammaln, logsumexp
+from .utilities import sq_maha_distance
 
 
 class MixtureBaseClass(metaclass=ABCMeta):
@@ -24,15 +20,14 @@ class MixtureBaseClass(metaclass=ABCMeta):
 
     def __init__(self):
         """Constructor. Each subclass will override."""
-        pass
-    
-    #The first group of functions stored under the base class check the 
+
+    #The first group of functions stored under the base class check the
     #user's inputs for training and prediction for validity. There are some
     #additional checks unique to the Variational class which are handled
     #by that class separately.
-    
-    #Function to check the user specified model parameters for validity.
-    def check_user_params(self, n_components, tol, reg_covar, 
+
+
+    def check_user_params(self, n_components, tol, reg_covar,
             max_iter, n_init, df, random_state,
             init_type):
         """Check the user specified model parameters for validity.
@@ -68,16 +63,17 @@ class MixtureBaseClass(metaclass=ABCMeta):
             reg_covar = float(reg_covar)
             init_type = str(init_type)
         except:
-            raise ValueError("n_components, tol, max_iter, n_init, reg_covar and random state should be numeric; "
-                    "init_type should be a string.")
+            raise ValueError("n_components, tol, max_iter, n_init, reg_covar "
+                "and random state should be numeric; init_type should be a string.")
         if df > 1000:
-            raise ValueError("Very large values for dof will give results essentially identical to a Gaussian mixture."
-                    "DF = 4 is suggested as a good default. If fixed_df is False, the df will be "
-                             "optimized.")
+            raise ValueError("Very large values for dof will give results "
+            "essentially identical to a Gaussian mixture. DF = 4 is suggested "
+            "as a good default. If fixed_df is False, the df will be optimized.")
         if df < 1:
             raise ValueError("Inappropriate starting value for df!")
         if max_iter < 1:
-            raise ValueError("Inappropriate value for the maximum number of iterations! Must be >= 1.")
+            raise ValueError("Inappropriate value for the maximum "
+            "number of iterations! Must be >= 1.")
         if n_init < 1:
             raise ValueError("Inappropriate value for the number of restarts! Must be >= 1.")
         if tol <= 0:
@@ -88,7 +84,7 @@ class MixtureBaseClass(metaclass=ABCMeta):
             raise ValueError("Reg covar must be >= 0.")
         if init_type not in ["k++", "kmeans"]:
             raise ValueError("init_type must be one of either 'k++' or 'kmeans'.")
-    
+
 
     def check_inputs(self, X):
         """Checks whether inputs to self.predict have the correct dimensionality.
@@ -138,7 +134,7 @@ class MixtureBaseClass(metaclass=ABCMeta):
 
         if self.df_ is None:
             raise ValueError("The model has not been successfully fitted yet.")
-    
+
 
     def check_fitting_data(self, X):
         """Check data supplied for fitting to ensure it meets basic criteria.
@@ -175,7 +171,7 @@ class MixtureBaseClass(metaclass=ABCMeta):
             raise ValueError("Too few datapoints for dataset "
             "dimensionality. You should have at least 2 datapoints per "
             "dimension (preferably more).")
-        if x.shape[0] <= 3*self.n_components:
+        if x.shape[0] <= 3 * self.n_components:
             raise ValueError("Too few datapoints for number of components "
             "in mixture. You should have at least 3 datapoints per mixture "
             "component (preferably more).")
@@ -184,7 +180,8 @@ class MixtureBaseClass(metaclass=ABCMeta):
 
 
 
-    def get_loglikelihood(self, X, sq_maha_dist, df_, scale_cholesky_, mix_weights_):
+    def get_loglikelihood(self, X, sq_maha_dist, df_,
+            scale_cholesky_, mix_weights_):
         """Calculates log p(X | theta) where theta is the current set of parameters but does
         not apply mixture weights.
         The function returns an array of dim N x K for N datapoints, K mixture components.
@@ -207,22 +204,22 @@ class MixtureBaseClass(metaclass=ABCMeta):
         """
 
         sq_maha_dist = 1 + sq_maha_dist / df_[np.newaxis,:]
-        
+
         #THe rest of this is just the calculations for log probability of X for the
         #student's t distributions described by the input parameters broken up
         #into three convenient chunks that we sum on the last line.
         sq_maha_dist = -0.5*(df_[np.newaxis,:] + X.shape[1]) * np.log(sq_maha_dist)
-        
+
         const_term = gammaln(0.5*(df_ + X.shape[1])) - gammaln(0.5*df_)
         const_term = const_term - 0.5*X.shape[1]*(np.log(df_) + np.log(np.pi))
-        
+
         scale_logdet = [np.sum(np.log(np.diag(scale_cholesky_[:,:,i])))
                         for i in range(self.n_components)]
         scale_logdet = np.asarray(scale_logdet)
         return -scale_logdet[np.newaxis,:] + const_term[np.newaxis,:] + sq_maha_dist
 
 
-    #The functions below are all called by models that have already been fitted and 
+    #The functions below are all called by models that have already been fitted and
     #are shared between the EM and Variational classes.
 
     def predict(self, X):
@@ -287,7 +284,7 @@ class MixtureBaseClass(metaclass=ABCMeta):
             self.check_model()
             X = self.check_inputs(X)
         return logsumexp(self.get_weighted_loglik(X), axis=1)
-        
+
     def fit_predict(self, X):
         """Simultaneously fits and makes predictions for the input dataset.
         Args:
@@ -358,11 +355,8 @@ class MixtureBaseClass(metaclass=ABCMeta):
         Returns:
             loglik (np.ndarray): The log-likelihood of each datapoint for each cluster.
         """
-        
-        sq_maha_dist = np.empty((X.shape[0], self.n_components))
-        squaredMahaDistance(X, self.location_, self.scale_inv_cholesky_, 
-                sq_maha_dist)
-        
+        sq_maha_dist = sq_maha_distance(X, self.location_, self.scale_cholesky_)
+
         loglik = self.get_loglikelihood(X, sq_maha_dist, self.df_, self.scale_cholesky_,
                         self.mix_weights_)
         return loglik + np.log(self.mix_weights_)[np.newaxis,:]
@@ -396,7 +390,8 @@ class MixtureBaseClass(metaclass=ABCMeta):
         """
 
         num_parameters = self.n_components - 1 + self.n_components * self.location_.shape[1]
-        num_parameters += 0.5 * self.scale_.shape[0] * (self.scale_.shape[1] + 1) * self.scale_.shape[2]
+        num_parameters += 0.5 * self.scale_.shape[0] * (self.scale_.shape[1] + 1) * \
+                self.scale_.shape[2]
         if self.fixed_df:
             return num_parameters
         else:
@@ -439,4 +434,4 @@ class MixtureBaseClass(metaclass=ABCMeta):
             comp_sample = rng.multivariate_normal(np.zeros(self.location_.shape[1]),
                             self.scale_[:,:,i], size=samples_per_component[i])
             sample_data.append(self.location_[i,:] + comp_sample / np.sqrt(x)[:,np.newaxis])
-        return np.vstack(sample_data) 
+        return np.vstack(sample_data)
