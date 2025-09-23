@@ -1,5 +1,0 @@
-exclude Documentation/Finite_Mixture_Docs.md
-exclude Documentation/Tutorial.md
-exclude Documentation/Variational_Mixture_Docs.md
-exclude Documentation/*.png
-exclude Documentation/*.pdf
