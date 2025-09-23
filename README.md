@@ -16,7 +16,7 @@ scikit-learn's BayesianGaussianMixture.
 
     pip install studenttmixture
 
-Starting with version 0.1, this is a pure Python package so installation
+Starting with version 1.11, this is a pure Python package so installation
 should be very straightforward.
 
 Dependencies are numpy, scipy and scikit-learn.

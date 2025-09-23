@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "studenttmixture"
 readme = "README.md"
-version = "0.1"
+version = "1.11"
 authors = [
     {name = "Jonathan Parkinson", email = "jlparkinson1@gmail.com"},
 ]
