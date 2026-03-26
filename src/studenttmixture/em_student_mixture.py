@@ -208,7 +208,7 @@ class EMStudentMixture(MixtureBaseClass):
                             df_ = self.Mstep(X, resp, E_gamma, scale_,
                                 scale_cholesky_, df_)
             change = current_bound - lower_bound
-            if abs(change) < self.tol:
+            if abs(change) / max(abs(current_bound), 1.0) < self.tol:
                 convergence = True
                 break
             lower_bound = current_bound
@@ -301,6 +301,22 @@ class EMStudentMixture(MixtureBaseClass):
         #Python implementation for a large number of clusters or dimensions.
         scale_, scale_cholesky_ = scale_update_calcs(X, ru, loc_,
                 resp_sum, self.reg_covar, covariance_type=self.covariance_type)
+
+        # Rescue empty components: reinitialize to the worst-fit datapoint.
+        for k in range(self.n_components):
+            if mix_weights_[k] < 1e-8:
+                worst_idx = np.argmin(np.max(resp, axis=1))
+                loc_[k] = X[worst_idx]
+                if self.covariance_type == 'diag':
+                    scale_[:,k] = np.var(X, axis=0) + self.reg_covar
+                    scale_cholesky_[:,k] = scale_[:,k]
+                else:
+                    scale_[:,:,k] = np.cov(X, rowvar=False)
+                    scale_[:,:,k].flat[::X.shape[1]+1] += self.reg_covar
+                    scale_cholesky_[:,:,k] = np.linalg.cholesky(scale_[:,:,k])
+                mix_weights_[k] = 1.0 / self.n_components
+                mix_weights_ /= mix_weights_.sum()
+
         if not self.fixed_df:
             df_ = self.optimize_df(X, resp, E_gamma, df_)
         return mix_weights_, loc_, scale_, scale_cholesky_, df_
@@ -403,8 +419,9 @@ class EMStudentMixture(MixtureBaseClass):
             scale_cholesky_ (np.ndarray): The cholesky decomposition of the scale
                 matrices; same shape as scale_.
         """
+        labels = None
         if init_type == "kmeans":
-            loc_ = self.kmeans_initialization(X, random_seed)
+            loc_, labels = self.kmeans_initialization(X, random_seed)
         else:
             loc_ = self.kplusplus_initialization(X, random_seed)
 
@@ -420,13 +437,23 @@ class EMStudentMixture(MixtureBaseClass):
             default_scale_matrix = default_scale_matrix.reshape(-1,1)
 
         if self.covariance_type == 'diag':
-            # For diagonal covariance, store only the diagonal elements.
+            # For diagonal covariance, use per-cluster variance from kmeans
+            # assignments when available, falling back to global covariance.
             default_diag = np.diag(default_scale_matrix).copy()
+            scale_ = np.empty((X.shape[1], self.n_components))
+            if labels is not None:
+                for k in range(self.n_components):
+                    mask = labels == k
+                    if np.sum(mask) > 1:
+                        scale_[:,k] = np.var(X[mask], axis=0) + self.reg_covar
+                    else:
+                        scale_[:,k] = default_diag
+            else:
+                for k in range(self.n_components):
+                    scale_[:,k] = default_diag
             # this is not really a cholesky decomposition but M x K (diagonal variances)
             # named like this for simplicity of return
-            scale_cholesky_ = np.stack([default_diag for i in range(self.n_components)],
-                            axis=-1)
-            scale_ = scale_cholesky_
+            scale_cholesky_ = scale_
         else:
             scale_ = np.stack([default_scale_matrix for i in range(self.n_components)],
                             axis=-1)
@@ -480,10 +507,12 @@ class EMStudentMixture(MixtureBaseClass):
         Returns:
             km.cluster_centers_ (np.ndarray): A numpy array of shape (n_components,)
                 with the center of each cluster; these will be refined during fitting.
+            km.labels_ (np.ndarray): A numpy array of shape (N,) with the cluster
+                assignment for each datapoint.
         """
         km = KMeans(n_clusters = self.n_components, n_init=3,
                 random_state = random_state).fit(X)
-        return km.cluster_centers_
+        return km.cluster_centers_, km.labels_
 
 
     #The remaining functions are called only for trained models. They are kept separate from the base

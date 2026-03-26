@@ -48,7 +48,7 @@ def two_component_diagonal_problem(draw):
     """Generate a two-component diagonal t-distribution problem with
     well-separated clusters."""
     M = 2 ** draw(integers(min_value=1, max_value=6))  # up to 64 dims for speed
-    N_per = max(3 * M, draw(integers(min_value=100, max_value=300)))
+    N_per = max(3 * M, draw(integers(min_value=200, max_value=500)))
     df = draw(floats(min_value=3.0, max_value=15.0))
 
     var1 = np.array([draw(floats(min_value=0.5, max_value=3.0)) for _ in range(M)])
@@ -167,7 +167,7 @@ class TestDiagonalEMHypothesis(unittest.TestCase):
 
         fit_scale = model.scale_.flatten()
         # Relax tolerance for high dimensions
-        rtol = 0.3 if M <= 64 else 0.5
+        rtol = 0.25 if M <= 64 else 0.35
         outcome = np.allclose(fit_scale, variances, rtol=rtol)
         if not outcome:
             max_rel_err = np.max(np.abs(fit_scale - variances) / variances)
@@ -285,6 +285,39 @@ class TestDiagonalEMHypothesis(unittest.TestCase):
         self.assertEqual(model.scale_.shape, (M, 2))
         self.assertEqual(model.df_.shape, (2,))
         self.assertEqual(model.mix_weights_.shape, (2,))
+
+        # --- Parameter recovery with label matching ---
+        # Match fitted components to true components by sorting on first dimension.
+        # loc1 is always negative, loc2 always positive (by strategy design).
+        idx = np.argsort(model.location_[:, 0])
+        fit_locs = model.location_[idx, :]
+        fit_scales = model.scale_[:, idx]
+        fit_weights = model.mix_weights_[idx]
+
+        true_locs = np.stack([loc1, loc2])  # loc1 < 0, loc2 > 0 → already sorted
+        true_vars = np.stack([var1, var2], axis=-1)  # M x 2
+
+        # Location recovery: per-dimension absolute error with statistical tolerance
+        N_per = N // 2
+        for k in range(2):
+            max_abs_err = np.max(np.abs(fit_locs[k] - true_locs[k]))
+            true_var = true_vars[:, k]
+            max_std_err = np.max(np.sqrt(true_var * df / (df - 2) / N_per))
+            tol = max(3 * max_std_err, 0.5)
+            self.assertLess(max_abs_err, tol,
+                    f"Location error {max_abs_err:.3f} > {tol:.3f} for component {k}, M={M}")
+
+        # Scale recovery: relaxed rtol since two-component is harder
+        scale_ok = np.allclose(fit_scales, true_vars, rtol=0.4)
+        if not scale_ok:
+            max_rel = np.max(np.abs(fit_scales - true_vars) / true_vars)
+            note(f"Max scale relative error: {max_rel:.3f}")
+        self.assertTrue(scale_ok,
+                f"Scale recovery failed for M={M}")
+
+        # Mix weights: should be approximately 0.5 each (equal samples per component)
+        self.assertTrue(np.allclose(fit_weights, 0.5, atol=0.05),
+                f"Mix weights {fit_weights} not close to [0.5, 0.5]")
 
 
     @given(diagonal_em_problem(), floats(min_value=2.0, max_value=20.0))

@@ -272,9 +272,9 @@ class TestEMStudentMixture(unittest.TestCase):
         #Location check
         location_distance = np.linalg.norm(fit_loc - true_loc, axis=1)
         true_loc_norm = np.linalg.norm(true_loc, axis=1)
-        location_outcome = np.max(location_distance / true_loc_norm) < 0.05
+        location_outcome = np.max(location_distance / true_loc_norm) < 0.03
         print("Is distance from fit locations to true locations "
-                "< 5 percent of the norm of true locations? %s"%location_outcome)
+                "< 3 percent of the norm of true locations? %s"%location_outcome)
 
         #Scale check: fit_scale is M x K (diagonal elements)
         scale_outcome = np.allclose(fit_scale, true_diag[:,idx], rtol=0.25)
