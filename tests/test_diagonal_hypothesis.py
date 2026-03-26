@@ -287,5 +287,92 @@ class TestDiagonalEMHypothesis(unittest.TestCase):
         self.assertEqual(model.mix_weights_.shape, (2,))
 
 
+    @given(diagonal_em_problem(), floats(min_value=2.0, max_value=20.0))
+    @settings(max_examples=50, deadline=None)
+    def test_fixed_df_preserved(self, problem, start_df):
+        """When fixed_df=True, df must remain exactly at the starting value."""
+        samples, location, variances, df = problem
+        M = samples.shape[1]
+        N = samples.shape[0]
+        _report_progress("fixed_df", M, N, start_df)
+        note(f"M={M}, N={N}, start_df={start_df:.1f}")
+
+        model = EMStudentMixture(n_components=1, covariance_type='diag',
+                fixed_df=True, df=start_df, max_iter=2000, tol=1e-6)
+        model.fit(samples)
+
+        # df must be exactly the starting value — not optimized
+        self.assertTrue(np.all(model.df_ == start_df),
+                f"df changed from {start_df} to {model.df_} with fixed_df=True")
+
+        # Basic validity checks still hold
+        self.assertTrue(model.converged_,
+                f"Model did not converge for M={M}")
+        self.assertTrue(np.all(np.isfinite(model.scale_)))
+        self.assertTrue(np.all(model.scale_ > 0))
+        self.assertTrue(np.all(np.isfinite(model.location_)))
+
+
+    @given(
+        integers(min_value=1, max_value=6),  # log2(M): 2 to 64
+        integers(min_value=500, max_value=1000),  # N
+        floats(min_value=1.0, max_value=3.0),  # low df danger zone
+    )
+    @settings(max_examples=50, deadline=None)
+    def test_low_df_no_nans(self, log2_M, N, df):
+        """Low df (1.0–3.0) should not produce NaN/Inf in fitted parameters."""
+        M = 2 ** log2_M
+        N = max(3 * M, N)
+        _report_progress("low_df", M, N, df)
+        note(f"M={M}, N={N}, df={df:.2f}")
+
+        # Generate data with low df
+        np.random.seed(hash((M, N, df)) % 2**31)
+        variances = np.random.uniform(0.5, 5.0, M)
+        location = np.random.uniform(-5.0, 5.0, M)
+        cov = np.diag(variances)
+        samples = scipy.stats.multivariate_t.rvs(location, cov, df=df, size=N)
+        if samples.ndim == 1:
+            samples = samples.reshape(-1, 1)
+
+        # Use fixed_df=True to avoid Newton-Raphson issues at extreme df
+        model = EMStudentMixture(n_components=1, covariance_type='diag',
+                fixed_df=True, df=df, max_iter=2000, tol=1e-6)
+        model.fit(samples)
+
+        # Must not produce NaN/Inf — the key invariant
+        self.assertTrue(np.all(np.isfinite(model.location_)),
+                f"NaN/Inf in location_ at df={df:.2f}, M={M}")
+        self.assertTrue(np.all(np.isfinite(model.scale_)),
+                f"NaN/Inf in scale_ at df={df:.2f}, M={M}")
+        self.assertTrue(np.all(model.scale_ > 0),
+                f"Non-positive scale_ at df={df:.2f}, M={M}")
+        self.assertTrue(np.all(np.isfinite(model.mix_weights_)),
+                f"NaN/Inf in mix_weights_ at df={df:.2f}, M={M}")
+
+    def test_very_low_df_no_crash(self):
+        """Extreme low df (Cauchy df=1, df=1.5) must not crash or produce NaN."""
+        print("*********************")
+        for df in [1.0, 1.5, 2.0]:
+            np.random.seed(42)
+            M, N = 4, 1000
+            variances = np.array([1.0, 2.0, 3.0, 4.0])
+            location = np.array([0.0, 1.0, -1.0, 2.0])
+            cov = np.diag(variances)
+            samples = scipy.stats.multivariate_t.rvs(location, cov, df=df, size=N)
+
+            model = EMStudentMixture(n_components=1, covariance_type='diag',
+                    fixed_df=True, df=df, max_iter=2000, tol=1e-6)
+            model.fit(samples)
+
+            all_finite = (np.all(np.isfinite(model.location_)) and
+                         np.all(np.isfinite(model.scale_)) and
+                         np.all(model.scale_ > 0))
+            print(f"df={df}: all params finite and positive? {all_finite}")
+            self.assertTrue(all_finite,
+                    f"NaN/Inf or non-positive scale at df={df}")
+        print('\n')
+
+
 if __name__ == "__main__":
     unittest.main()
