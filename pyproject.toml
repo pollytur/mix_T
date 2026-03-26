@@ -30,7 +30,4 @@ Documentation = "https://github.com/jlparkI/mix_T"
 [dependency-groups]
 dev = [
     "hypothesis>=6.31.6",
-    "jupyter>=1.1.1",
-    "matplotlib>=3.3.4",
-    "nbconvert>=6.0.7",
 ]
