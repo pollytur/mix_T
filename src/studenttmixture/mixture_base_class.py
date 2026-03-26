@@ -213,9 +213,15 @@ class MixtureBaseClass(metaclass=ABCMeta):
         const_term = gammaln(0.5*(df_ + X.shape[1])) - gammaln(0.5*df_)
         const_term = const_term - 0.5*X.shape[1]*(np.log(df_) + np.log(np.pi))
 
-        scale_logdet = [np.sum(np.log(np.diag(scale_cholesky_[:,:,i])))
-                        for i in range(self.n_components)]
-        scale_logdet = np.asarray(scale_logdet)
+        covariance_type = getattr(self, 'covariance_type', 'full')
+        if covariance_type == 'diag':
+            # scale_cholesky_ is M x K: diagonal variances
+            scale_logdet = 0.5 * np.sum(np.log(scale_cholesky_), axis=0)
+        else:
+            # scale_cholesky_ is M x M x K: Cholesky decompositions
+            scale_logdet = [np.sum(np.log(np.diag(scale_cholesky_[:,:,i])))
+                            for i in range(self.n_components)]
+            scale_logdet = np.asarray(scale_logdet)
         return -scale_logdet[np.newaxis,:] + const_term[np.newaxis,:] + sq_maha_dist
 
 
@@ -355,7 +361,9 @@ class MixtureBaseClass(metaclass=ABCMeta):
         Returns:
             loglik (np.ndarray): The log-likelihood of each datapoint for each cluster.
         """
-        sq_maha_dist = sq_maha_distance(X, self.location_, self.scale_cholesky_)
+        covariance_type = getattr(self, 'covariance_type', 'full')
+        sq_maha_dist = sq_maha_distance(X, self.location_, self.scale_cholesky_,
+                        covariance_type=covariance_type)
 
         loglik = self.get_loglikelihood(X, sq_maha_dist, self.df_, self.scale_cholesky_,
                         self.mix_weights_)
@@ -390,8 +398,14 @@ class MixtureBaseClass(metaclass=ABCMeta):
         """
 
         num_parameters = self.n_components - 1 + self.n_components * self.location_.shape[1]
-        num_parameters += 0.5 * self.scale_.shape[0] * (self.scale_.shape[1] + 1) * \
-                self.scale_.shape[2]
+        covariance_type = getattr(self, 'covariance_type', 'full')
+        if covariance_type == 'diag':
+            # scale_ is M x K: M diagonal elements per component
+            num_parameters += self.scale_.shape[0] * self.scale_.shape[1]
+        else:
+            # scale_ is M x M x K: M*(M+1)/2 unique elements per component
+            num_parameters += 0.5 * self.scale_.shape[0] * (self.scale_.shape[1] + 1) * \
+                    self.scale_.shape[2]
         if self.fixed_df:
             return num_parameters
         else:
@@ -426,12 +440,18 @@ class MixtureBaseClass(metaclass=ABCMeta):
         #that student's t distributions can be described as an infinite scale mixture
         #of Gaussians). Finally, we sample from a standard normal and shift using
         #the location and the sample from the chisquare distribution.
+        covariance_type = getattr(self, 'covariance_type', 'full')
         for i in range(self.n_components):
             if np.isinf(self.df_[i]):
                 x = 1.0
             else:
                 x = rng.chisquare(self.df_[i], size=samples_per_component[i]) / self.df_[i]
-            comp_sample = rng.multivariate_normal(np.zeros(self.location_.shape[1]),
-                            self.scale_[:,:,i], size=samples_per_component[i])
+            if covariance_type == 'diag':
+                # scale_ is M x K: diagonal elements, sample independent normals
+                comp_sample = rng.normal(0, 1, size=(samples_per_component[i],
+                                self.location_.shape[1])) * np.sqrt(self.scale_[:,i])[np.newaxis,:]
+            else:
+                comp_sample = rng.multivariate_normal(np.zeros(self.location_.shape[1]),
+                                self.scale_[:,:,i], size=samples_per_component[i])
             sample_data.append(self.location_[i,:] + comp_sample / np.sqrt(x)[:,np.newaxis])
         return np.vstack(sample_data)

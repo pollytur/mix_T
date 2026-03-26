@@ -204,5 +204,159 @@ class TestEMStudentMixture(unittest.TestCase):
 
 
 
+    def test_covariance_type_validation(self):
+        """Test that covariance_type parameter is validated correctly."""
+        print("*********************")
+        # 'full' and 'diag' should be accepted
+        em_full = EMStudentMixture(covariance_type='full')
+        self.assertEqual(em_full.covariance_type, 'full')
+        em_diag = EMStudentMixture(covariance_type='diag')
+        self.assertEqual(em_diag.covariance_type, 'diag')
+
+        # 'tied' and 'spherical' should raise NotImplementedError
+        with self.assertRaises(NotImplementedError):
+            EMStudentMixture(covariance_type='tied')
+        with self.assertRaises(NotImplementedError):
+            EMStudentMixture(covariance_type='spherical')
+
+        # Invalid strings should raise ValueError
+        with self.assertRaises(ValueError):
+            EMStudentMixture(covariance_type='invalid')
+        with self.assertRaises(ValueError):
+            EMStudentMixture(covariance_type='diagonal')
+
+        print("covariance_type validation tests passed")
+        print('\n')
+
+
+    def test_em_fit_diagonal_students_t(self):
+        """Test fitting with covariance_type='diag' using an artificial dataset
+        with known diagonal scale matrices."""
+        print("*********************")
+        #Diagonal scale matrices
+        true_cov = [np.asarray([[1.6, 0.0, 0.0],
+                            [0.0, 4.5, 0.0],
+                            [0.0, 0.0, 3.2]]),
+                    np.asarray([[0.5, 0.0, 0.0],
+                            [0.0, 2.0, 0.0],
+                            [0.0, 0.0, 1.0]]),
+                    np.asarray([[3.0, 0.0, 0.0],
+                            [0.0, 0.8, 0.0],
+                            [0.0, 0.0, 5.0]])]
+        true_cov = np.stack(true_cov, axis=-1)
+        true_diag = np.array([[1.6, 0.5, 3.0],
+                              [4.5, 2.0, 0.8],
+                              [3.2, 1.0, 5.0]])
+        #Arbitrary locations
+        true_loc = np.asarray([[-2.5, 3.6, 1.2],
+                            [3.2, -5.2, -2.1], [4.5, 3.6, 7.2]])
+
+        np.random.seed(123)
+        samples = [scipy.stats.multivariate_t.rvs(true_loc[i,:], true_cov[:,:,i],
+                    df=4, size=500) for i in range(3)]
+        samples = np.vstack(samples)
+
+        DiagMix = EMStudentMixture(fixed_df=False, random_state=123,
+                n_components=3, max_iter=2000, tol=1e-7,
+                n_init=3, covariance_type='diag')
+        DiagMix.fit(samples)
+
+        #Retrieve the fit parameters and sort them
+        fit_loc = DiagMix.location
+        idx = np.argsort(fit_loc[:,0])
+        fit_loc = fit_loc[idx,:]
+        fit_scale = DiagMix.scale_[:,idx]
+        fit_df = DiagMix.degrees_of_freedom[idx]
+
+        print("For a three cluster toy dataset with diagonal covariance...")
+        #Location check
+        location_distance = np.linalg.norm(fit_loc - true_loc, axis=1)
+        true_loc_norm = np.linalg.norm(true_loc, axis=1)
+        location_outcome = np.max(location_distance / true_loc_norm) < 0.03
+        print("Is distance from fit locations to true locations "
+                "< 3 percent of the norm of true locations? %s"%location_outcome)
+
+        #Scale check: fit_scale is M x K (diagonal elements)
+        scale_outcome = np.allclose(fit_scale, true_diag[:,idx], rtol=0.25)
+        print(f"Are diagonal scale values close to truth (rtol=0.25)? {scale_outcome}")
+
+        #DF check
+        fit_df_error = np.max(np.abs(fit_df - 4))
+        fit_df_outcome = fit_df_error < 1.0
+        print("Are the estimated degrees of freedom between 3 and 5? %s"%fit_df_outcome)
+
+        self.assertTrue(location_outcome)
+        self.assertTrue(scale_outcome)
+        self.assertTrue(fit_df_outcome)
+
+        print('\n')
+
+
+    def test_diagonal_sampling(self):
+        """Test that sampling works correctly with covariance_type='diag'."""
+        print("*********************")
+        true_cov = np.asarray([[1.6, 0.0, 0.0],
+                            [0.0, 4.5, 0.0],
+                            [0.0, 0.0, 3.2]])
+        true_loc = np.asarray([[4.5, 3.6, 7.2]])
+
+        np.random.seed(123)
+        samples = scipy.stats.multivariate_t.rvs(true_loc[0,:], true_cov,
+                    df=4, size=500)
+
+        DiagMix = EMStudentMixture(fixed_df=False, random_state=123,
+                n_components=1, max_iter=1500, tol=1e-7,
+                covariance_type='diag')
+        DiagMix.fit(samples)
+
+        generated = DiagMix.sample(num_samples=100, random_seed=42)
+        shape_outcome = generated.shape == (100, 3)
+        print(f"Does sampling produce correct shape? {shape_outcome}")
+        self.assertTrue(shape_outcome)
+
+        print('\n')
+
+
+    def test_diagonal_aic_bic(self):
+        """Test that AIC and BIC work with covariance_type='diag' and that
+        diagonal BIC is lower than full BIC when true covariance is diagonal."""
+        print("*********************")
+        true_cov = np.asarray([[1.6, 0.0, 0.0],
+                            [0.0, 4.5, 0.0],
+                            [0.0, 0.0, 3.2]])
+        true_loc = np.asarray([[4.5, 3.6, 7.2]])
+
+        np.random.seed(123)
+        samples = scipy.stats.multivariate_t.rvs(true_loc[0,:], true_cov,
+                    df=4, size=500)
+
+        DiagMix = EMStudentMixture(fixed_df=False, random_state=123,
+                n_components=1, max_iter=1500, tol=1e-7,
+                covariance_type='diag')
+        DiagMix.fit(samples)
+
+        FullMix = EMStudentMixture(fixed_df=False, random_state=123,
+                n_components=1, max_iter=1500, tol=1e-7,
+                covariance_type='full')
+        FullMix.fit(samples)
+
+        diag_aic = DiagMix.aic(samples)
+        diag_bic = DiagMix.bic(samples)
+        full_bic = FullMix.bic(samples)
+
+        finite_outcome = np.isfinite(diag_aic) and np.isfinite(diag_bic)
+        print(f"Are diagonal AIC and BIC finite? {finite_outcome}")
+
+        # Diagonal BIC should be lower (better) than full BIC when true
+        # covariance is diagonal, because fewer parameters are penalized.
+        bic_outcome = diag_bic < full_bic
+        print(f"Is diagonal BIC < full BIC for diagonal data? {bic_outcome}")
+
+        self.assertTrue(finite_outcome)
+        self.assertTrue(bic_outcome)
+
+        print('\n')
+
+
 if __name__ == "__main__":
     unittest.main()

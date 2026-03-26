@@ -32,6 +32,9 @@ class EMStudentMixture(MixtureBaseClass):
             maximum).
         random_state (int): The random seed for random number generator initialization.
         verbose (bool): If True, print updates throughout fitting.
+        covariance_type (str): The type of covariance parameters to use. One of
+            'full' (each component has its own full covariance matrix, shape M x M x K)
+            or 'diag' (each component has its own diagonal covariance, stored as M x K).
         mix_weights_ (np.ndarray): The mixture weights; a 1d numpy array of shape K
             for K components.
         location_ (np.ndarray): The cluster centers; corresponds to the mean values
@@ -39,9 +42,10 @@ class EMStudentMixture(MixtureBaseClass):
             components, M input dimensions.)
         scale_ (np.ndarray): The component scale matrices; corresponds to the covariance
             matrices of a Gaussian mixture model. A 3d numpy array of shape M x M x K
-            for M input dimensions, K components.
+            for M input dimensions, K components. For 'diag', shape is M x K.
         scale_cholesky_ (np.ndarray): The cholesky decompositions of the scale matrices;
-            same shape as the scale_ attribute.
+            same shape as the scale_ attribute. For 'diag', contains the square roots
+            of the diagonal elements, shape M x K.
         converged_ (bool): Indicates whether the model converged during fitting.
         n_iter_ (int): The number of iterations completed during fitting.
         df_ (np.ndarray): The degrees of freedom for each mixture component; a 1d
@@ -51,7 +55,7 @@ class EMStudentMixture(MixtureBaseClass):
     def __init__(self, n_components = 2, tol=1e-5,
             reg_covar=1e-06, max_iter=1000, n_init=1,
             df = 4.0, fixed_df = True, random_state=123, verbose=False,
-            init_type = "kmeans"):
+            init_type = "kmeans", covariance_type="full"):
         """Constructor for EMStudentMixture.
 
         Args:
@@ -76,8 +80,14 @@ class EMStudentMixture(MixtureBaseClass):
             init_type (str): One of 'kmeans', 'k++'. Determines how cluster centers
                 are initialized. 'kmeans' provides better performance and is the
                 default; 'k++' may be slightly faster.
+            covariance_type (str): One of 'full', 'diag', 'tied', 'spherical'.
+                'full' uses unrestricted covariance matrices (M x M x K).
+                'diag' uses diagonal covariance matrices (stored as M x K).
+                'tied' and 'spherical' are not yet implemented.
+                Defaults to 'full'.
         """
         super().__init__()
+        self._validate_covariance_type(covariance_type)
         self.check_user_params(n_components, tol, reg_covar, max_iter, n_init, df, random_state,
                 init_type)
         self.start_df_ = float(df)
@@ -90,6 +100,7 @@ class EMStudentMixture(MixtureBaseClass):
         self.n_init = n_init
         self.random_state = random_state
         self.verbose = verbose
+        self.covariance_type = covariance_type
         self.mix_weights_ = None
         self.location_ = None
         self.scale_ = None
@@ -97,6 +108,28 @@ class EMStudentMixture(MixtureBaseClass):
         self.converged_ = False
         self.n_iter_ = 0
         self.df_ = None
+
+
+    def _validate_covariance_type(self, covariance_type):
+        """Validate the covariance_type parameter.
+
+        Args:
+            covariance_type (str): The covariance type to validate.
+
+        Raises:
+            ValueError: If covariance_type is not a recognized string.
+            NotImplementedError: If covariance_type is 'tied' or 'spherical'.
+        """
+        if covariance_type in ('tied', 'spherical'):
+            raise NotImplementedError(
+                f"covariance_type='{covariance_type}' is not yet implemented. "
+                f"Use 'full' or 'diag'."
+            )
+        if covariance_type not in ('full', 'diag'):
+            raise ValueError(
+                f"Invalid covariance_type '{covariance_type}'. "
+                f"Must be one of: 'full', 'diag', 'tied', 'spherical'."
+            )
 
 
 
@@ -175,7 +208,7 @@ class EMStudentMixture(MixtureBaseClass):
                             df_ = self.Mstep(X, resp, E_gamma, scale_,
                                 scale_cholesky_, df_)
             change = current_bound - lower_bound
-            if abs(change) < self.tol:
+            if abs(change) / max(abs(current_bound), 1.0) < self.tol:
                 convergence = True
                 break
             lower_bound = current_bound
@@ -212,7 +245,8 @@ class EMStudentMixture(MixtureBaseClass):
             """
         #We use the C extension to calculate squared mahalanobis distance and pass
         #it the array (sq_maha_dist) in which we would like to store the output.
-        sq_maha_dist = sq_maha_distance(X, loc_, scale_cholesky_)
+        sq_maha_dist = sq_maha_distance(X, loc_, scale_cholesky_,
+                covariance_type=self.covariance_type)
 
         loglik = self.get_loglikelihood(X, sq_maha_dist, df_,
                 scale_cholesky_, mix_weights_)
@@ -266,7 +300,23 @@ class EMStudentMixture(MixtureBaseClass):
         #and scale inv cholesky matrices and is faster than the pure
         #Python implementation for a large number of clusters or dimensions.
         scale_, scale_cholesky_ = scale_update_calcs(X, ru, loc_,
-                resp_sum, self.reg_covar)
+                resp_sum, self.reg_covar, covariance_type=self.covariance_type)
+
+        # Rescue empty components: reinitialize to the worst-fit datapoint.
+        for k in range(self.n_components):
+            if mix_weights_[k] < 1e-8:
+                worst_idx = np.argmin(np.max(resp, axis=1))
+                loc_[k] = X[worst_idx]
+                if self.covariance_type == 'diag':
+                    scale_[:,k] = np.var(X, axis=0) + self.reg_covar
+                    scale_cholesky_[:,k] = scale_[:,k]
+                else:
+                    scale_[:,:,k] = np.cov(X, rowvar=False)
+                    scale_[:,:,k].flat[::X.shape[1]+1] += self.reg_covar
+                    scale_cholesky_[:,:,k] = np.linalg.cholesky(scale_[:,:,k])
+                mix_weights_[k] = 1.0 / self.n_components
+                mix_weights_ /= mix_weights_.sum()
+
         if not self.fixed_df:
             df_ = self.optimize_df(X, resp, E_gamma, df_)
         return mix_weights_, loc_, scale_, scale_cholesky_, df_
@@ -369,8 +419,9 @@ class EMStudentMixture(MixtureBaseClass):
             scale_cholesky_ (np.ndarray): The cholesky decomposition of the scale
                 matrices; same shape as scale_.
         """
+        labels = None
         if init_type == "kmeans":
-            loc_ = self.kmeans_initialization(X, random_seed)
+            loc_, labels = self.kmeans_initialization(X, random_seed)
         else:
             loc_ = self.kplusplus_initialization(X, random_seed)
 
@@ -384,10 +435,30 @@ class EMStudentMixture(MixtureBaseClass):
         #For 1-d data, ensure default scale matrix has correct shape.
         if len(default_scale_matrix.shape) < 2:
             default_scale_matrix = default_scale_matrix.reshape(-1,1)
-        scale_ = np.stack([default_scale_matrix for i in range(self.n_components)],
-                        axis=-1)
-        scale_cholesky_ = [np.linalg.cholesky(scale_[:,:,i]) for i in range(self.n_components)]
-        scale_cholesky_ = np.stack(scale_cholesky_, axis=-1)
+
+        if self.covariance_type == 'diag':
+            # For diagonal covariance, use per-cluster variance from kmeans
+            # assignments when available, falling back to global covariance.
+            default_diag = np.diag(default_scale_matrix).copy()
+            scale_ = np.empty((X.shape[1], self.n_components))
+            if labels is not None:
+                for k in range(self.n_components):
+                    mask = labels == k
+                    if np.sum(mask) > 1:
+                        scale_[:,k] = np.var(X[mask], axis=0) + self.reg_covar
+                    else:
+                        scale_[:,k] = default_diag
+            else:
+                for k in range(self.n_components):
+                    scale_[:,k] = default_diag
+            # this is not really a cholesky decomposition but M x K (diagonal variances)
+            # named like this for simplicity of return
+            scale_cholesky_ = scale_
+        else:
+            scale_ = np.stack([default_scale_matrix for i in range(self.n_components)],
+                            axis=-1)
+            scale_cholesky_ = [np.linalg.cholesky(scale_[:,:,i]) for i in range(self.n_components)]
+            scale_cholesky_ = np.stack(scale_cholesky_, axis=-1)
         return loc_, scale_, mix_weights_, scale_cholesky_
 
 
@@ -436,10 +507,12 @@ class EMStudentMixture(MixtureBaseClass):
         Returns:
             km.cluster_centers_ (np.ndarray): A numpy array of shape (n_components,)
                 with the center of each cluster; these will be refined during fitting.
+            km.labels_ (np.ndarray): A numpy array of shape (N,) with the cluster
+                assignment for each datapoint.
         """
         km = KMeans(n_clusters = self.n_components, n_init=3,
                 random_state = random_state).fit(X)
-        return km.cluster_centers_
+        return km.cluster_centers_, km.labels_
 
 
     #The remaining functions are called only for trained models. They are kept separate from the base
