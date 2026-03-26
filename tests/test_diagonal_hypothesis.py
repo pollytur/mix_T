@@ -407,5 +407,62 @@ class TestDiagonalEMHypothesis(unittest.TestCase):
         print('\n')
 
 
+class _BoundTrackingMixture(EMStudentMixture):
+    """Thin subclass that records the lower bound at each EM iteration."""
+
+    def Estep(self, X, df_, loc_, scale_cholesky_, mix_weights_, sq_maha_dist):
+        resp, E_gamma, lower_bound = super().Estep(
+                X, df_, loc_, scale_cholesky_, mix_weights_, sq_maha_dist)
+        if not hasattr(self, '_bounds'):
+            self._bounds = []
+        self._bounds.append(lower_bound)
+        return resp, E_gamma, lower_bound
+
+
+class TestMonotonicity(unittest.TestCase):
+
+    @given(diagonal_em_problem())
+    @settings(max_examples=50, deadline=None)
+    def test_monotonicity_diag(self, problem):
+        """EM lower bound must be non-decreasing at each iteration (diagonal)."""
+        samples, location, variances, df = problem
+        M = samples.shape[1]
+        N = samples.shape[0]
+        _report_progress("monotonicity_diag", M, N, df)
+        note(f"M={M}, N={N}, df={df:.1f}")
+
+        model = _BoundTrackingMixture(n_components=1, covariance_type='diag',
+                fixed_df=False, max_iter=500, tol=1e-8)
+        model._bounds = []
+        model.fit(samples)
+
+        bounds = model._bounds
+        self.assertGreater(len(bounds), 1, "Should have multiple iterations")
+        for i in range(1, len(bounds)):
+            self.assertGreaterEqual(bounds[i], bounds[i-1] - 1e-10,
+                    f"Bound decreased at iteration {i}: {bounds[i-1]:.6f} -> {bounds[i]:.6f}")
+
+    @given(diagonal_em_problem())
+    @settings(max_examples=50, deadline=None)
+    def test_monotonicity_full(self, problem):
+        """EM lower bound must be non-decreasing at each iteration (full)."""
+        samples, location, variances, df = problem
+        M = samples.shape[1]
+        N = samples.shape[0]
+        _report_progress("monotonicity_full", M, N, df)
+        note(f"M={M}, N={N}, df={df:.1f}")
+
+        model = _BoundTrackingMixture(n_components=1, covariance_type='full',
+                fixed_df=False, max_iter=500, tol=1e-8)
+        model._bounds = []
+        model.fit(samples)
+
+        bounds = model._bounds
+        self.assertGreater(len(bounds), 1, "Should have multiple iterations")
+        for i in range(1, len(bounds)):
+            self.assertGreaterEqual(bounds[i], bounds[i-1] - 1e-10,
+                    f"Bound decreased at iteration {i}: {bounds[i-1]:.6f} -> {bounds[i]:.6f}")
+
+
 if __name__ == "__main__":
     unittest.main()
