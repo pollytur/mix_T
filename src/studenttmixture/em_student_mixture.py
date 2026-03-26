@@ -426,6 +426,7 @@ class EMStudentMixture(MixtureBaseClass):
             # named like this for simplicity of return
             scale_cholesky_ = np.stack([default_diag for i in range(self.n_components)],
                             axis=-1)
+            scale_ = scale_cholesky_
         else:
             scale_ = np.stack([default_scale_matrix for i in range(self.n_components)],
                             axis=-1)
