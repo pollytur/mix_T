@@ -421,11 +421,11 @@ class EMStudentMixture(MixtureBaseClass):
 
         if self.covariance_type == 'diag':
             # For diagonal covariance, store only the diagonal elements.
-            # scale_ is M x K, scale_cholesky_ is M x K (square roots).
             default_diag = np.diag(default_scale_matrix).copy()
-            scale_ = np.stack([default_diag for i in range(self.n_components)],
+            # this is not really a cholesky decomposition but M x K (diagonal variances)
+            # named like this for simplicity of return
+            scale_cholesky_ = np.stack([default_diag for i in range(self.n_components)],
                             axis=-1)
-            scale_cholesky_ = np.sqrt(scale_)
         else:
             scale_ = np.stack([default_scale_matrix for i in range(self.n_components)],
                             axis=-1)

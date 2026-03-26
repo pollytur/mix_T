@@ -215,8 +215,8 @@ class MixtureBaseClass(metaclass=ABCMeta):
 
         covariance_type = getattr(self, 'covariance_type', 'full')
         if covariance_type == 'diag':
-            # scale_cholesky_ is M x K: square roots of diagonal elements
-            scale_logdet = np.sum(np.log(scale_cholesky_), axis=0)
+            # scale_cholesky_ is M x K: diagonal variances
+            scale_logdet = 0.5 * np.sum(np.log(scale_cholesky_), axis=0)
         else:
             # scale_cholesky_ is M x M x K: Cholesky decompositions
             scale_logdet = [np.sum(np.log(np.diag(scale_cholesky_[:,:,i])))

@@ -23,9 +23,8 @@ def sq_maha_distance(X, loc_, scale, covariance_type='full'):
     for i in range(loc_.shape[0]):
         diff = X - loc_[None,i,:]
         if covariance_type == 'diag':
-            # scale is M x K: square roots of diagonal elements of scale matrices
-            scaled_diff = diff / scale[:,i][np.newaxis, :]
-            sq_maha_dist[:,i] = (scaled_diff**2).sum(axis=1)
+            # scale is M x K: diagonal variances of scale matrices
+            sq_maha_dist[:,i] = ((diff**2) / scale[:,i][np.newaxis, :]).sum(axis=1)
         else:
             # scale is M x M x K: Cholesky decompositions of scale matrices
             diff = scipy.linalg.solve_triangular(
@@ -41,8 +40,8 @@ def scale_update_calcs(X, ru, loc_, resp_sum, reg_covar, covariance_type='full')
     K = loc_.shape[0]
 
     if covariance_type == 'diag':
-        # scale_ is M x K: diagonal elements of scale matrices
-        # scale_decomp is M x K: square roots of diagonal elements
+        # scale_ is M x K: diagonal variances of scale matrices
+        # scale_decomp is M x K: same diagonal variances
         scale_ = np.empty((M, K))
         scale_decomp = np.empty((M, K))
     else:
@@ -60,7 +59,8 @@ def scale_update_calcs(X, ru, loc_, resp_sum, reg_covar, covariance_type='full')
                         / (resp_sum[i] + 10 * np.finfo(scale_.dtype).eps)
                 diag_vals += reg_covar
                 scale_[:,i] = diag_vals
-                scale_decomp[:,i] = np.sqrt(diag_vals)
+                # For 'diag', scale_decomp stores the same diagonal variances
+                scale_decomp[:,i] = diag_vals
             else:
                 scale_[:,:,i] = np.dot(ru[:,i] * diff.T, diff) \
                         / (resp_sum[i] + 10 * np.finfo(scale_.dtype).eps)

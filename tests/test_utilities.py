@@ -61,8 +61,8 @@ class TestSqMahaDistExtension(unittest.TestCase):
         #Diagonal scale matrices
         diag1 = np.array([0.025, 0.007, 0.00043])
         diag2 = np.array([1.2, 0.5, 0.35])
-        #scale for 'diag' is M x K (square roots of diagonal elements)
-        scale_diag = np.stack([np.sqrt(diag1), np.sqrt(diag2)], axis=-1)
+        #scale for 'diag' is M x K (diagonal variances)
+        scale_diag = np.stack([diag1, diag2], axis=-1)
         #Arbitrary locations
         loc = np.asarray([[0.156,-0.324,0.456],[-2.5,3.6,1.2]])
 
@@ -107,10 +107,10 @@ class TestSqMahaDistExtension(unittest.TestCase):
         print(f"Are output shapes M x K? {shape_outcome}")
         self.assertTrue(shape_outcome)
 
-        # Check scale_decomp is sqrt of scale_
-        sqrt_outcome = np.allclose(scale_decomp, np.sqrt(scale_))
-        print(f"Is scale_decomp the sqrt of scale_? {sqrt_outcome}")
-        self.assertTrue(sqrt_outcome)
+        # For 'diag', scale_decomp stores the same diagonal variances as scale_
+        same_outcome = np.allclose(scale_decomp, scale_)
+        print(f"Is scale_decomp equal to scale_ for diag? {same_outcome}")
+        self.assertTrue(same_outcome)
 
         # Verify diagonal values match expected weighted variance
         for i in range(K):
