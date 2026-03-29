@@ -5,6 +5,7 @@ License: MIT
 """
 import math
 import numpy as np
+from joblib import Parallel, delayed
 from scipy.linalg import solve_triangular
 from scipy.special import logsumexp, digamma, polygamma
 from scipy.optimize import newton
@@ -32,6 +33,8 @@ class EMStudentMixture(MixtureBaseClass):
             maximum).
         random_state (int): The random seed for random number generator initialization.
         verbose (bool): If True, print updates throughout fitting.
+        n_jobs (int): The number of parallel jobs for running n_init restarts.
+            1 means sequential, -1 means all processors.
         covariance_type (str): The type of covariance parameters to use. One of
             'full' (each component has its own full covariance matrix, shape M x M x K)
             or 'diag' (each component has its own diagonal covariance, stored as M x K).
@@ -55,7 +58,7 @@ class EMStudentMixture(MixtureBaseClass):
     def __init__(self, n_components = 2, tol=1e-5,
             reg_covar=1e-06, max_iter=1000, n_init=1,
             df = 4.0, fixed_df = True, random_state=123, verbose=False,
-            init_type = "kmeans", covariance_type="full"):
+            n_jobs=1, init_type = "kmeans", covariance_type="full"):
         """Constructor for EMStudentMixture.
 
         Args:
@@ -77,6 +80,9 @@ class EMStudentMixture(MixtureBaseClass):
                 initializing the model.
             verbose (bool): If True, print updates throughout fitting. Defaults to
                 False.
+            n_jobs (int): The number of parallel jobs for running n_init restarts.
+                1 means sequential execution, -1 means using all processors.
+                Defaults to 1.
             init_type (str): One of 'kmeans', 'k++'. Determines how cluster centers
                 are initialized. 'kmeans' provides better performance and is the
                 default; 'k++' may be slightly faster.
@@ -100,6 +106,7 @@ class EMStudentMixture(MixtureBaseClass):
         self.n_init = n_init
         self.random_state = random_state
         self.verbose = verbose
+        self.n_jobs = n_jobs
         self.covariance_type = covariance_type
         self.mix_weights_ = None
         self.location_ = None
@@ -148,11 +155,14 @@ class EMStudentMixture(MixtureBaseClass):
 
         #We use self.n_init restarts and save the best result. More restarts = better
         #chance to find the best possible solution, but also higher cost.
-        for i in range(self.n_init):
-            #Increment random state so that each random initialization is different from the
-            #rest but so that the overall chain is reproducible.
-            lower_bound, convergence, loc_, scale_, mix_weights_,\
-                    df_, scale_cholesky_ = self.fitting_restart(x, self.random_state + i)
+        #Restarts are run in parallel using joblib when n_jobs != 1.
+        results = Parallel(n_jobs=self.n_jobs)(
+            delayed(self.fitting_restart)(x, self.random_state + i)
+            for i in range(self.n_init)
+        )
+
+        for i, (lower_bound, convergence, loc_, scale_, mix_weights_,
+                df_, scale_cholesky_) in enumerate(results):
             if self.verbose:
                 print(f"Restart {i} now complete")
             if not convergence:
