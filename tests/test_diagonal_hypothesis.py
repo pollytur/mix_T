@@ -410,9 +410,9 @@ class TestDiagonalEMHypothesis(unittest.TestCase):
 class _BoundTrackingMixture(EMStudentMixture):
     """Thin subclass that records the lower bound at each EM iteration."""
 
-    def Estep(self, X, df_, loc_, scale_cholesky_, mix_weights_, sq_maha_dist):
+    def Estep(self, X, df_, loc_, scale_cholesky_, mix_weights_, sq_maha_dist, **kwargs):
         resp, E_gamma, lower_bound = super().Estep(
-                X, df_, loc_, scale_cholesky_, mix_weights_, sq_maha_dist)
+                X, df_, loc_, scale_cholesky_, mix_weights_, sq_maha_dist, **kwargs)
         if not hasattr(self, '_bounds'):
             self._bounds = []
         self._bounds.append(lower_bound)

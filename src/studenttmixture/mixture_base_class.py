@@ -181,11 +181,11 @@ class MixtureBaseClass(metaclass=ABCMeta):
 
 
     def get_loglikelihood(self, X, sq_maha_dist, df_,
-            scale_cholesky_, mix_weights_):
+            scale_cholesky_, mix_weights_, xp=None, xsp_special=None):
         """Calculates log p(X | theta) where theta is the current set of parameters but does
         not apply mixture weights.
         The function returns an array of dim N x K for N datapoints, K mixture components.
-        It expects to receive the squared mahalanobis distance and the model 
+        It expects to receive the squared mahalanobis distance and the model
         parameters (since during model fitting these are still being updated).
         Note that the Variational class uses this function only for trained models,
         whereas EM uses it during training.
@@ -198,31 +198,30 @@ class MixtureBaseClass(metaclass=ABCMeta):
             scale_cholesky_ (np.ndarray): The cholesky decompositions of the scale matrices.
                 Dimensions = M x M x K.
             mix_weights_ (np.ndarray): The mixture weights for the K components.
+            xp: Array module (numpy or cupy). Defaults to numpy.
+            xsp_special: Scipy special module (scipy.special or cupyx.scipy.special).
 
         Returns:
             The log-likelihood of the data given the input parameters (a float).
         """
+        if xp is None:
+            xp = np
+        _gammaln = xsp_special.gammaln if xsp_special is not None else gammaln
 
-        sq_maha_dist = 1 + sq_maha_dist / df_[np.newaxis,:]
+        sq_maha_dist = 1 + sq_maha_dist / df_[xp.newaxis,:]
 
-        #THe rest of this is just the calculations for log probability of X for the
-        #student's t distributions described by the input parameters broken up
-        #into three convenient chunks that we sum on the last line.
-        sq_maha_dist = -0.5*(df_[np.newaxis,:] + X.shape[1]) * np.log(sq_maha_dist)
+        sq_maha_dist = -0.5*(df_[xp.newaxis,:] + X.shape[1]) * xp.log(sq_maha_dist)
 
-        const_term = gammaln(0.5*(df_ + X.shape[1])) - gammaln(0.5*df_)
-        const_term = const_term - 0.5*X.shape[1]*(np.log(df_) + np.log(np.pi))
+        const_term = _gammaln(0.5*(df_ + X.shape[1])) - _gammaln(0.5*df_)
+        const_term = const_term - 0.5*X.shape[1]*(xp.log(df_) + float(np.log(np.pi)))
 
         covariance_type = getattr(self, 'covariance_type', 'full')
         if covariance_type == 'diag':
-            # scale_cholesky_ is M x K: diagonal variances
-            scale_logdet = 0.5 * np.sum(np.log(scale_cholesky_), axis=0)
+            scale_logdet = 0.5 * xp.sum(xp.log(scale_cholesky_), axis=0)
         else:
-            # scale_cholesky_ is M x M x K: Cholesky decompositions
-            scale_logdet = [np.sum(np.log(np.diag(scale_cholesky_[:,:,i])))
-                            for i in range(self.n_components)]
-            scale_logdet = np.asarray(scale_logdet)
-        return -scale_logdet[np.newaxis,:] + const_term[np.newaxis,:] + sq_maha_dist
+            diag_idx = xp.arange(scale_cholesky_.shape[0])
+            scale_logdet = xp.sum(xp.log(scale_cholesky_[diag_idx, diag_idx, :]), axis=0)
+        return -scale_logdet[xp.newaxis,:] + const_term[xp.newaxis,:] + sq_maha_dist
 
 
     #The functions below are all called by models that have already been fitted and

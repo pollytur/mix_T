@@ -10,7 +10,7 @@ authors = [
     {name = "Jonathan Parkinson", email = "jlparkinson1@gmail.com"},
 ]
 description = "Mixture modeling algorithms using the Student's t-distribution"
-requires-python = ">=3.6"
+requires-python = ">=3.8"
 keywords = ["mixture models", "T distribution", "student's T distribution",
     "mixture of T distributions", "mixture of Student's T distributions",
     "variational mixture", "variational inference"]
@@ -21,7 +21,8 @@ dependencies = [
     "scikit-learn"
 ]
 
-
+[project.optional-dependencies]
+gpu = ["cupy-cuda12x"]
 
 [project.urls]
 Homepage = "https://github.com/jlparkI/mix_T"

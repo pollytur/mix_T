@@ -3,14 +3,12 @@
 Author: Jonathan Parkinson <jlparkinson1@gmail.com>
 License: MIT
 """
-import math
 import numpy as np
-from scipy.linalg import solve_triangular
 from scipy.special import logsumexp, digamma, polygamma
-from scipy.optimize import newton
 from sklearn.cluster import KMeans
 from .utilities import sq_maha_distance, scale_update_calcs
 from .mixture_base_class import MixtureBaseClass
+from ._backend import get_array_module, to_device, to_numpy
 
 
 
@@ -55,7 +53,8 @@ class EMStudentMixture(MixtureBaseClass):
     def __init__(self, n_components = 2, tol=1e-5,
             reg_covar=1e-06, max_iter=1000, n_init=1,
             df = 4.0, fixed_df = True, random_state=123, verbose=False,
-            init_type = "kmeans", covariance_type="full"):
+            init_type = "kmeans", covariance_type="full", n_jobs=1,
+            device="cpu"):
         """Constructor for EMStudentMixture.
 
         Args:
@@ -85,6 +84,12 @@ class EMStudentMixture(MixtureBaseClass):
                 'diag' uses diagonal covariance matrices (stored as M x K).
                 'tied' and 'spherical' are not yet implemented.
                 Defaults to 'full'.
+            n_jobs (int): Number of parallel jobs for n_init restarts. 1 means
+                sequential (default). -1 uses all available cores. Requires
+                joblib (installed with scikit-learn). Defaults to 1.
+            device (str): Compute device. 'cpu' uses NumPy/SciPy (default).
+                'gpu' uses CuPy for GPU acceleration (requires CuPy installed).
+                Defaults to 'cpu'.
         """
         super().__init__()
         self._validate_covariance_type(covariance_type)
@@ -101,6 +106,9 @@ class EMStudentMixture(MixtureBaseClass):
         self.random_state = random_state
         self.verbose = verbose
         self.covariance_type = covariance_type
+        self.n_jobs = n_jobs
+        self.device = device
+        self._use_gpu = (device == 'gpu')
         self.mix_weights_ = None
         self.location_ = None
         self.scale_ = None
@@ -137,7 +145,8 @@ class EMStudentMixture(MixtureBaseClass):
     def fit(self, X):
         """Fit model using the parameters the user selected when creating the model object.
         Creates multiple restarts by calling the fitting_restart function n_init times.
-        
+        When n_jobs != 1, restarts run in parallel using joblib.
+
         Args:
             X (np.ndarray): The raw data for fitting. This must be either a 1d array, in which case
                 self.check_fitting_data will reshape it to a 2d 1-column array, or
@@ -146,25 +155,40 @@ class EMStudentMixture(MixtureBaseClass):
         x = self.check_fitting_data(X)
         best_lower_bound = -np.inf
 
-        #We use self.n_init restarts and save the best result. More restarts = better
-        #chance to find the best possible solution, but also higher cost.
-        for i in range(self.n_init):
-            #Increment random state so that each random initialization is different from the
-            #rest but so that the overall chain is reproducible.
-            lower_bound, convergence, loc_, scale_, mix_weights_,\
-                    df_, scale_cholesky_ = self.fitting_restart(x, self.random_state + i)
-            if self.verbose:
-                print(f"Restart {i} now complete")
-            if not convergence:
-                print(f"Restart {i+1} did not converge!")
-            #If this is the best lower bound we've seen so far, update our saved
-            #parameters.
-            elif lower_bound > best_lower_bound:
-                best_lower_bound = lower_bound
-                self.df_, self.location_, self.scale_ = df_, loc_, scale_
-                self.scale_cholesky_ = scale_cholesky_
-                self.mix_weights_ = mix_weights_
-                self.converged_ = True
+        if self.n_jobs == 1 or self.n_init == 1:
+            # Sequential path
+            for i in range(self.n_init):
+                lower_bound, convergence, loc_, scale_, mix_weights_,\
+                        df_, scale_cholesky_ = self.fitting_restart(x, self.random_state + i)
+                if self.verbose:
+                    print(f"Restart {i} now complete")
+                if not convergence:
+                    print(f"Restart {i+1} did not converge!")
+                elif lower_bound > best_lower_bound:
+                    best_lower_bound = lower_bound
+                    self.df_, self.location_, self.scale_ = df_, loc_, scale_
+                    self.scale_cholesky_ = scale_cholesky_
+                    self.mix_weights_ = mix_weights_
+                    self.converged_ = True
+        else:
+            from joblib import Parallel, delayed
+            results = Parallel(n_jobs=self.n_jobs)(
+                delayed(self.fitting_restart)(x, self.random_state + i)
+                for i in range(self.n_init)
+            )
+            for i, (lower_bound, convergence, loc_, scale_,
+                    mix_weights_, df_, scale_cholesky_) in enumerate(results):
+                if self.verbose:
+                    print(f"Restart {i} now complete")
+                if not convergence:
+                    print(f"Restart {i+1} did not converge!")
+                elif lower_bound > best_lower_bound:
+                    best_lower_bound = lower_bound
+                    self.df_, self.location_, self.scale_ = df_, loc_, scale_
+                    self.scale_cholesky_ = scale_cholesky_
+                    self.mix_weights_ = mix_weights_
+                    self.converged_ = True
+
         if not self.converged_:
             print("The model did not converge on any of the restarts! Try increasing max_iter or "
                         "tol or check data for possible issues.")
@@ -172,12 +196,12 @@ class EMStudentMixture(MixtureBaseClass):
 
     def fitting_restart(self, X, random_state):
         """A single fitting restart.
-        
+
         Args:
             X (np.ndarray): The raw data. Must be a 2d array where each column is a feature and
                 each row is a datapoint. The caller (self.fit) ensures this is true.
             random_state (int): The seed for the random number generator.
-        
+
         Returns:
             current_bound (float): The lower bound for the current fitting iteration.
                 The caller (self.fit) keeps the set of parameters that have the best
@@ -187,26 +211,38 @@ class EMStudentMixture(MixtureBaseClass):
                 Shape is K x M for K components, M dimensions.
             scale_ (np.ndarray): The scale matrices (analogous to covariance for a Gaussian).
                 Shape is M x M x K for M dimensions, K components.
-            mix_weights_ (np.ndarray): The mixture weights. SHape is K for K components.
+            mix_weights_ (np.ndarray): The mixture weights. Shape is K for K components.
             df_ (np.ndarray): The degrees of freedom. Shape is K for K components.
             scale_cholesky_ (np.ndarray): The cholesky decomposition of the scale matrices.
                 Shape is M x M x K for M dimensions, K components.
         """
+        xp, xsp = get_array_module(self._use_gpu)
+
+        # Initialization stays on CPU, then move to device
         df_ = np.full((self.n_components), self.start_df_, dtype=np.float64)
         loc_, scale_, mix_weights_, scale_cholesky_ = \
                 self.initialize_params(X, random_state, self.init_type)
-        lower_bound, convergence = -np.inf, False
-        sq_maha_dist = np.empty((X.shape[0], self.n_components))
 
-        #For each iteration, we run the E step calculations then the M step
-        #calculations, update the lower bound then check for convergence.
+        if self._use_gpu:
+            X_dev = to_device(X, xp)
+            df_ = to_device(df_, xp)
+            loc_ = to_device(loc_, xp)
+            scale_ = to_device(scale_, xp)
+            mix_weights_ = to_device(mix_weights_, xp)
+            scale_cholesky_ = to_device(scale_cholesky_, xp)
+        else:
+            X_dev = X
+
+        lower_bound, convergence = -np.inf, False
+
         for _ in range(self.max_iter):
-            resp, E_gamma, current_bound = self.Estep(X, df_, loc_,
-                                scale_cholesky_, mix_weights_, sq_maha_dist)
+            resp, E_gamma, current_bound = self.Estep(X_dev, df_, loc_,
+                                scale_cholesky_, mix_weights_, None,
+                                xp=xp, xsp=xsp)
 
             mix_weights_, loc_, scale_, scale_cholesky_, \
-                            df_ = self.Mstep(X, resp, E_gamma, scale_,
-                                scale_cholesky_, df_)
+                            df_ = self.Mstep(X_dev, resp, E_gamma, scale_,
+                                scale_cholesky_, df_, xp=xp)
             change = current_bound - lower_bound
             if abs(change) / max(abs(current_bound), 1.0) < self.tol:
                 convergence = True
@@ -215,159 +251,166 @@ class EMStudentMixture(MixtureBaseClass):
             if self.verbose:
                 print(f"Change in lower bound: {change}")
                 print(f"Actual lower bound: {current_bound}")
+
+        # Move results back to CPU numpy arrays
+        if self._use_gpu:
+            loc_ = to_numpy(loc_)
+            scale_ = to_numpy(scale_)
+            mix_weights_ = to_numpy(mix_weights_)
+            df_ = to_numpy(df_)
+            scale_cholesky_ = to_numpy(scale_cholesky_)
+
         return current_bound, convergence, loc_, scale_, \
                 mix_weights_, df_, scale_cholesky_
 
 
 
     def Estep(self, X, df_, loc_, scale_cholesky_, mix_weights_,
-            sq_maha_dist):
+            sq_maha_dist, xp=None, xsp=None):
         """Update the "hidden variables" in the mixture description.
-        
+
         Args:
-            X (np.ndarray): The input data. A 2d numpy array of shape N x M.
-            df_ (np.ndarray): The degrees of freedom. Shape is K for K components.
-            loc_ (np.ndarray): The current values of the locations of the components.
-                Shape is K x D for K components, D dimensions.
-            scale_cholesky_ (np.ndarray): The cholesky decomposition of the scale matrices.
-                Shape is M x M x K for M dimensions, K components.
-            mix_weights_ (np.ndarray: The mixture weights. Shape is K for K components.
-            sq_maha_dist (np.ndarray): The squared mahalanobis distance for each datapoint
-                for each component. A 2d N x K numpy array.
+            X: The input data. Shape N x M.
+            df_: The degrees of freedom. Shape K.
+            loc_: The locations of the components. Shape K x D.
+            scale_cholesky_: The cholesky decomposition of scale matrices.
+            mix_weights_: The mixture weights. Shape K.
+            sq_maha_dist: Unused (kept for API compat).
+            xp: Array module (numpy or cupy).
+            xsp: Scipy module (scipy or cupyx.scipy).
 
         Returns:
-            resp (np.ndarray): The responsibilities of each component for each datapoint.
-                Shape is N x K (N datapoints, K components).
-            E_gamma (np.ndarray): The ML estimate of the "hidden variable" described by 
-                a gamma distribution in the formulation of the student's t-distribution
-                as a scale mixture of normals. 
-            lower_bound (np.ndarray): The lower bound (to determine whether fit has converged).
-            """
-        #We use the C extension to calculate squared mahalanobis distance and pass
-        #it the array (sq_maha_dist) in which we would like to store the output.
+            resp: Responsibilities, shape N x K.
+            E_gamma: Expected gamma values, shape N x K.
+            lower_bound: Mean log-likelihood (float).
+        """
+        if xp is None:
+            xp = np
+        xsp_special = xsp.special if xsp is not None and hasattr(xsp, 'special') else None
+
         sq_maha_dist = sq_maha_distance(X, loc_, scale_cholesky_,
-                covariance_type=self.covariance_type)
+                covariance_type=self.covariance_type, xp=xp)
 
         loglik = self.get_loglikelihood(X, sq_maha_dist, df_,
-                scale_cholesky_, mix_weights_)
+                scale_cholesky_, mix_weights_, xp=xp, xsp_special=xsp_special)
 
-        weighted_log_prob = loglik + np.log(np.clip(mix_weights_,
-                                        a_min=1e-12, a_max=None))[np.newaxis,:]
-        log_prob_norm = logsumexp(weighted_log_prob, axis=1)
-        with np.errstate(under="ignore"):
-            resp = np.exp(weighted_log_prob - log_prob_norm[:, np.newaxis])
-        E_gamma = (df_[np.newaxis,:] + X.shape[1]) / (df_[np.newaxis,:] + sq_maha_dist)
-        lower_bound = np.mean(log_prob_norm)
+        weighted_log_prob = loglik + xp.log(xp.clip(mix_weights_,
+                                        a_min=1e-12, a_max=None))[xp.newaxis,:]
+        if xsp is not None and hasattr(xsp, 'special'):
+            _logsumexp = xsp.special.logsumexp
+        else:
+            _logsumexp = logsumexp
+        log_prob_norm = _logsumexp(weighted_log_prob, axis=1)
+        resp = xp.exp(weighted_log_prob - log_prob_norm[:, xp.newaxis])
+        E_gamma = (df_[xp.newaxis,:] + X.shape[1]) / (df_[xp.newaxis,:] + sq_maha_dist)
+        lower_bound = float(xp.mean(log_prob_norm))
         return resp, E_gamma, lower_bound
 
 
 
-    def Mstep(self, X, resp, E_gamma, scale_, scale_cholesky_, df_):
+    def Mstep(self, X, resp, E_gamma, scale_, scale_cholesky_, df_, xp=None):
         """The M-step in mixture fitting. Updates the component parameters
         using the "hidden variable" values calculated in the E-step.
-    
-        Args:
-            X (np.ndarray): The input data. A numpy array of shape N x M for N datapoints,
-                M features.
-            resp (np.ndarray): The responsibilities of each component for each datapoint.
-                Shape is N x K (N datapoints, K components).
-            E_gamma (np.ndarray): The ML estimate of the "hidden variable" described by 
-                a gamma distribution in the formulation of the student's t-distribution
-                as a scale mixture of normals. 
-            scale_ (np.ndarray): The scale matrices (analogous to covariance for a Gaussian).
-                Shape is M x M x K for M dimensions, K components.
-            scale_cholesky_ (np.ndarray): The cholesky decomposition of the scale matrices.
-                Shape is M x M x K for M dimensions, K components.
-            df_ (np.ndarray): The degrees of freedom. Shape is K for K components.
-        
-        Returns:
-            mix_weights_ (np.ndarray): The mixture weights. SHape is K for K components.
-            loc_ (np.ndarray): The locations (analogous to means for a Gaussian) of the components.
-                Shape is K x D for K components, D dimensions.
-            scale_ (np.ndarray): The scale matrices (analogous to covariance for a Gaussian).
-                Shape is D x D x K for D dimensions, K components.
-            scale_cholesky_ (np.ndarray): The cholesky decomposition of the scale matrices.
-                Shape is D x D x K for D dimensions, K components.
-            df_ (np.ndarray): The degrees of freedom. Shape is K for K components.
-        """
-        mix_weights_ = np.mean(resp, axis=0)
-        ru = resp * E_gamma
-        loc_ = np.dot(ru.T, X)
-        resp_sum = np.sum(ru, axis=0) + 10 * np.finfo(resp.dtype).eps
-        loc_ = loc_ / resp_sum[:,np.newaxis]
 
-        #This call to the Cython extension updates the scale, scale cholesky
-        #and scale inv cholesky matrices and is faster than the pure
-        #Python implementation for a large number of clusters or dimensions.
+        Args:
+            X: The input data. Shape N x M.
+            resp: Responsibilities. Shape N x K.
+            E_gamma: Expected gamma values. Shape N x K.
+            scale_: Scale matrices. Shape M x M x K (full) or M x K (diag).
+            scale_cholesky_: Cholesky decomposition of scale matrices.
+            df_: Degrees of freedom. Shape K.
+            xp: Array module (numpy or cupy).
+
+        Returns:
+            mix_weights_, loc_, scale_, scale_cholesky_, df_
+        """
+        if xp is None:
+            xp = np
+        mix_weights_ = xp.mean(resp, axis=0)
+        ru = resp * E_gamma
+        loc_ = xp.dot(ru.T, X)
+        resp_sum = xp.sum(ru, axis=0) + 10 * np.finfo(np.float64).eps
+        loc_ = loc_ / resp_sum[:,xp.newaxis]
+
         scale_, scale_cholesky_ = scale_update_calcs(X, ru, loc_,
-                resp_sum, self.reg_covar, covariance_type=self.covariance_type)
+                resp_sum, self.reg_covar, covariance_type=self.covariance_type,
+                xp=xp)
 
         # Rescue empty components: reinitialize to the worst-fit datapoint.
         for k in range(self.n_components):
-            if mix_weights_[k] < 1e-8:
-                worst_idx = np.argmin(np.max(resp, axis=1))
+            if float(mix_weights_[k]) < 1e-8:
+                worst_idx = int(xp.argmin(xp.max(resp, axis=1)))
                 loc_[k] = X[worst_idx]
                 if self.covariance_type == 'diag':
-                    scale_[:,k] = np.var(X, axis=0) + self.reg_covar
+                    scale_[:,k] = xp.var(X, axis=0) + self.reg_covar
                     scale_cholesky_[:,k] = scale_[:,k]
                 else:
-                    scale_[:,:,k] = np.cov(X, rowvar=False)
+                    # Covariance computation — use numpy on CPU for np.cov compat
+                    X_cpu = to_numpy(X) if self._use_gpu else X
+                    cov_matrix = xp.asarray(np.cov(X_cpu, rowvar=False))
+                    scale_[:,:,k] = cov_matrix
                     scale_[:,:,k].flat[::X.shape[1]+1] += self.reg_covar
-                    scale_cholesky_[:,:,k] = np.linalg.cholesky(scale_[:,:,k])
+                    scale_cholesky_[:,:,k] = xp.linalg.cholesky(scale_[:,:,k])
                 mix_weights_[k] = 1.0 / self.n_components
                 mix_weights_ /= mix_weights_.sum()
 
         if not self.fixed_df:
-            df_ = self.optimize_df(X, resp, E_gamma, df_)
+            # DF optimization uses scipy special functions — run on CPU
+            if self._use_gpu:
+                df_cpu = self.optimize_df(to_numpy(X), to_numpy(resp),
+                                         to_numpy(E_gamma), to_numpy(df_))
+                df_ = to_device(df_cpu, xp)
+            else:
+                df_ = self.optimize_df(X, resp, E_gamma, df_)
         return mix_weights_, loc_, scale_, scale_cholesky_, df_
 
 
 
     def optimize_df(self, X, resp, E_gamma, df_):
-        """Optimizes the df parameter using Newton Raphson.
-        
+        """Optimizes the df parameter using a vectorized Newton-Raphson over
+        all K components simultaneously.
+
         Args:
             X (np.ndarray): The input data, a numpy array of shape N x M
                 for N datapoints, M features.
             resp (np.ndarray): The responsibility of each cluster for each
                 datapoint. An N x K numpy array for K components.
-            E_gamma (np.ndarray): The ML estimate of the "hidden variable" described by 
+            E_gamma (np.ndarray): The ML estimate of the "hidden variable" described by
                 a gamma distribution in the formulation of the student's t-distribution
-                as a scale mixture of normals. 
+                as a scale mixture of normals.
             df_ (np.ndarray): The current estimate of degrees of freedom.
 
         Returns:
             df_ (np.ndarray): The updated estimate for degrees of freedom.
         """
-        #First calculate the constant term of the degrees of freedom optimization
-        #expression so that it does not need to be recalculated on each iteration.
         df_x_dim = 0.5 * (df_ + X.shape[1])
         resp_sum = np.sum(resp, axis=0)
         ru_sum = np.sum(resp * (np.log(E_gamma) - E_gamma), axis=0)
         constant_term = 1.0 + (ru_sum / resp_sum) + digamma(df_x_dim) - \
                     np.log(df_x_dim)
-        for i in range(self.n_components):
-            optimal_df = newton(func = self.dof_first_deriv, x0 = df_[i],
-                                 fprime = self.dof_second_deriv,
-                                 fprime2 = self.dof_third_deriv,
-                                 args = ([constant_term[i]]),  maxiter=self.max_iter,
-                                 full_output = False, disp=False, tol=1e-3)
-            #It may occasionally happen that newton does not converge, usually
-            #if the user has set a very small value for max_iter, which is used both
-            #for the maximum number of iterations per restart AND for the max
-            #number of iterations per newton raphson optimization, or because
-            #df is going to infinity, because the distribution is very close to
-            #normal. If it doesn't converge, keep the last estimated value.
-            if math.isnan(optimal_df) == False:
-                df_[i] = optimal_df
-            #DF should never be less than 1 but can go arbitrarily high.
-            if df_[i] < 1:
-                df_[i] = 1.0
-        return df_
+
+        current_df = df_.copy()
+        for _ in range(min(self.max_iter, 50)):
+            clipped_df = np.clip(current_df, a_min=1e-9, a_max=None)
+            half_df = 0.5 * clipped_df
+            # First derivative (f) and second derivative (fp) for Newton step
+            f = constant_term - digamma(half_df) + np.log(half_df)
+            fp = -0.5 * polygamma(1, half_df) + 1.0 / clipped_df
+            step = f / fp
+            current_df = current_df - step
+            if np.all(np.abs(step) < 1e-3):
+                break
+
+        # Keep old values where Newton diverged (NaN)
+        mask = np.isnan(current_df)
+        current_df[mask] = df_[mask]
+        # DF should never be less than 1 but can go arbitrarily high.
+        current_df = np.clip(current_df, 1.0, None)
+        return current_df
 
 
     def dof_first_deriv(self, dof, constant_term):
-        """First derivative of the complete data log likelihood w/r/t df. This is used to 
+        """First derivative of the complete data log likelihood w/r/t df. This is used to
         optimize the input value (dof) via the Newton-Raphson algorithm using the scipy.optimize.
         newton function (see self.optimize_df).
         """
@@ -381,16 +424,15 @@ class EMStudentMixture(MixtureBaseClass):
         """
         return -0.5 * polygamma(1, 0.5 * dof) + 1 / dof
 
-
     def dof_third_deriv(self, dof, constant_term):
         """Third derivative of the complete data log likelihood w/r/t df. This is used to optimize
         the input value (dof) via the Newton-Raphson algorithm using the scipy.optimize.newton
-        function (see self.optimize_df). 
+        function (see self.optimize_df).
         """
         return -0.25 * polygamma(2, 0.5 * dof) - 1 / (dof**2)
 
 
-    
+
 
     def initialize_params(self, X, random_seed, init_type):
         """Initializes the model parameters. Two approaches are available for initializing
